@@ -1,26 +1,28 @@
 /*
  * ==============================================================================
- * PROJETO: Chat Bidirecional LoRa com Heltec ESP32 WiFi LoRa 32 (V2)
+ * PROJETO: Chat Ponto a Ponto (P2P) Endereçado com Heltec ESP32 WiFi LoRa 32 (V2)
  * ==============================================================================
  * 
  * Descrição:
- *  - Comunicação bidirecional sem fio ponto-a-ponto entre 2 placas Heltec LoRa V2.
- *  - O mesmo código é gravado em AMBAS as placas.
- *  - O que você digitar no Monitor Serial de uma placa é enviado via LoRa e 
- *    exibido no Monitor Serial e no display OLED da outra placa (e vice-versa).
- *  - Feedback em tempo real no Display OLED 0.96" integrado (SSD1306 I2C).
- *  - Indicador de força de sinal (RSSI) e relação sinal-ruído (SNR).
- *  - Pisca o LED onboard (GPIO 25) durante transmissões e recepções.
+ *  - Comunicação bidirecional direta e privada entre 2 placas (Placa A e Placa B).
+ *  - Camada de Endereçamento (Node Addressing):
+ *      -> Cada pacote contém [Network ID (0xB1A2)] + [Destinatário] + [Remetente].
+ *      -> Placas ignoram qualquer mensagem de redes/sensores vizinhos ("Caixa cheia", etc).
+ *      -> Placas ignoram mensagens não destinadas explicitamente ao seu ID.
+ *  - Canal Exclusivo: Frequência sintonizada em 916.5 MHz e SyncWord em 0xB1 (hardware filter).
+ *  - Feedback em tempo real no Display OLED 0.96" e no Monitor Serial (115200 baud).
+ *  - Botão PRG (GPIO 0): envia um ping direcionado para a outra placa.
  *
- * AVISO IMPORTANTE DE HARDWARE:
- *  NUNCA ligue a placa ou inicie o código sem a antena LoRa conectada!
- *  Transmitir sem antena pode queimar o circuito amplificador de potência (PA)
- *  do rádio SX1276 permanentemente devido à onda estacionária.
+ * COMO CARREGAR NAS PLACAS:
+ *  1. Para a primeira placa:
+ *     Deixe ativado: #define PLACA_A
+ *     Carregue o código na Placa A.
  *
- * Configurações da IDE Arduino:
- *  - Placa: "WiFi LoRa 32(V2)" (em Ferramentas -> Placa -> Heltec ESP32 Series)
- *  - Upload Speed: 921600 ou 115200
- *  - Monitor Serial: Baud Rate 115200, "Nova linha" (Newline) ou "Ambos NL e CR"
+ *  2. Para a segunda placa:
+ *     Comente a Placa A e descomente a Placa B:
+ *     //#define PLACA_A
+ *     #define PLACA_B
+ *     Carregue o código na Placa B.
  * ==============================================================================
  */
 
@@ -30,7 +32,41 @@
 #include "HT_SSD1306Wire.h"
 
 // ==============================================================================
-// DEFINIÇÃO DOS PINOS (Heltec WiFi LoRa 32 V2)
+// 1. SELEÇÃO DA IDENTIDADE DA PLACA
+// ==============================================================================
+// Descomente apenas UMA das duas linhas abaixo antes de carregar o código:
+#define PLACA_A     // Placa 1: ID = 1 (Envia para Placa B)
+//#define PLACA_B   // Placa 2: ID = 2 (Envia para Placa A)
+
+#if defined(PLACA_A)
+  const uint8_t MEU_ID   = 1;
+  const uint8_t DEST_ID  = 2;
+  const char*   NOME_MEU = "Placa A";
+  const char*   NOME_DEST= "Placa B";
+#elif defined(PLACA_B)
+  const uint8_t MEU_ID   = 2;
+  const uint8_t DEST_ID  = 1;
+  const char*   NOME_MEU = "Placa B";
+  const char*   NOME_DEST= "Placa A";
+#else
+  #error "Selecione PLACA_A ou PLACA_B no topo do arquivo!"
+#endif
+
+// ==============================================================================
+// 2. DEFINIÇÃO DE ENDEREÇAMENTO E ISOLAMENTO DE REDE
+// ==============================================================================
+#define NETWORK_ID            0xB1A2    // Assinatura exclusiva da sua rede (filtro de firmware)
+#define LORA_SYNCWORD         0xB1      // SyncWord exclusivo (filtro a nível de silício SX1276)
+
+// Estrutura do cabeçalho binário (4 bytes)
+struct __attribute__((packed)) LoRaHeader {
+  uint16_t netId;   // Identificador da rede (0xB1A2)
+  uint8_t  dest;    // ID do nó destinatário (quem deve ler)
+  uint8_t  src;     // ID do nó remetente (quem enviou)
+};
+
+// ==============================================================================
+// 3. DEFINIÇÃO DOS PINOS (Heltec WiFi LoRa 32 V2)
 // ==============================================================================
 #ifndef SDA_OLED
 #define SDA_OLED 4
@@ -61,19 +97,16 @@
 #endif
 
 // ==============================================================================
-// CONFIGURAÇÕES DO RÁDIO LoRa
+// 4. CONFIGURAÇÕES DO RÁDIO LoRa
 // ==============================================================================
-// Frequência de operação (deve ser idêntica nas duas placas)
-// 915E6 (915 MHz) - Padrão Brasil / Américas
-// 868E6 (868 MHz) - Europa
-// 433E6 (433 MHz) - Ásia / Faixa 433
-#define RF_FREQUENCY                                915000000 // Hz
+// Frequência de operação em 916.5 MHz (afastada do canal padrão 915.0 MHz usado por sensores vizinhos)
+#define RF_FREQUENCY                                916500000 // Hz
 
-#define TX_OUTPUT_POWER                             5         // dBm (Use 5 para bancada próxima; 14 a 20 para longo alcance)
+#define TX_OUTPUT_POWER                             10        // dBm (10 dBm para bancada; 14 a 20 para campo aberto)
 #define LORA_BANDWIDTH                              0         // [0: 125 kHz, 1: 250 kHz, 2: 500 kHz]
 #define LORA_SPREADING_FACTOR                       7         // [SF7..SF12] (SF7 é rápido e excelente para chat)
 #define LORA_CODINGRATE                             1         // [1: 4/5, 2: 4/6, 3: 4/7, 4: 4/8]
-#define LORA_PREAMBLE_LENGTH                        8         // Tamanho do preâmbulo (igual para TX e RX)
+#define LORA_PREAMBLE_LENGTH                        8         // Tamanho do preâmbulo
 #define LORA_SYMBOL_TIMEOUT                         0         // Timeout de símbolos
 #define LORA_FIX_LENGTH_PAYLOAD_ON                  false
 #define LORA_IQ_INVERSION_ON                        false
@@ -81,9 +114,9 @@
 #define BUFFER_SIZE                                 256       // Tamanho máximo do pacote
 
 // ==============================================================================
-// OBJETOS E VARIÁVEIS GLOBAIS
+// 5. OBJETOS E VARIÁVEIS GLOBAIS
 // ==============================================================================
-// O objeto 'display' já é instanciado globalmente pela biblioteca Heltec (LoRaWan_APP.cpp)
+// O objeto 'display' é instanciado globalmente pela biblioteca Heltec (LoRaWan_APP.cpp)
 extern SSD1306Wire display;
 
 static RadioEvents_t RadioEvents;
@@ -119,19 +152,21 @@ void setup() {
   // Configura LED de status e botão PRG onboard (GPIO 0)
   pinMode(LED, OUTPUT);
   digitalWrite(LED, LOW);
-  pinMode(0, INPUT_PULLUP); // Botão PRG / USER na placa
+  pinMode(0, INPUT_PULLUP);
 
   // Inicializa o Display OLED
   display.init();
   display.flipScreenVertically();
   display.setFont(ArialMT_Plain_10);
   
-  // Tela de boas-vindas inicial
+  // Tela de inicialização
   display.clear();
   display.setTextAlignment(TEXT_ALIGN_CENTER);
-  display.drawString(64, 15, "Iniciando LoRa...");
-  display.drawString(64, 35, "Heltec ESP32 V2");
+  display.drawString(64, 10, "Iniciando LoRa P2P");
+  display.drawString(64, 25, String(NOME_MEU));
+  display.drawString(64, 42, "Destino: " + String(NOME_DEST));
   display.display();
+  delay(600);
 
   // Inicializa o MCU Heltec
   Mcu.begin(HELTEC_BOARD, SLOW_CLK_TPYE);
@@ -158,7 +193,11 @@ void setup() {
                     LORA_SYMBOL_TIMEOUT, LORA_FIX_LENGTH_PAYLOAD_ON,
                     0, true, 0, 0, LORA_IQ_INVERSION_ON, true);
 
-  // Coloca o rádio em modo de escuta contínua inicial
+  // Configura o SyncWord personalizado no registrador do chip SX1276 (0x39)
+  // Bloqueia pacotes de qualquer dispositivo com SyncWord padrão (0x12 ou 0x34)
+  Radio.Write(0x39, LORA_SYNCWORD);
+
+  // Inicia em modo de escuta contínua
   lora_idle = true;
   Radio.Rx(0);
 
@@ -166,25 +205,27 @@ void setup() {
 
   Serial.println();
   Serial.println("==================================================================");
-  Serial.println("         HELTEC ESP32 LORA V2 - CHAT SERIAL BIDIRECIONAL          ");
+  Serial.printf("    HELTEC ESP32 LORA V2 - CHAT ENDERECADO [%s]\n", NOME_MEU);
   Serial.println("==================================================================");
-  Serial.printf(" Frequencia: %.2f MHz | SF: %d | BW: 125 kHz\n", RF_FREQUENCY / 1E6, LORA_SPREADING_FACTOR);
+  Serial.printf(" Meu Endereco    : Nó %d (%s)\n", MEU_ID, NOME_MEU);
+  Serial.printf(" Endereco Destino: Nó %d (%s)\n", DEST_ID, NOME_DEST);
+  Serial.printf(" Frequencia Privada : %.2f MHz | SyncWord: 0x%02X\n", RF_FREQUENCY / 1E6, LORA_SYNCWORD);
+  Serial.printf(" Network ID Privado : 0x%04X (filtra 100%% de sinais vizinhos)\n", NETWORK_ID);
+  Serial.println("------------------------------------------------------------------");
   Serial.println(" Instrucoes:");
-  Serial.println("  1. Digite o texto na caixa de entrada acima e pressione Enter.");
-  Serial.println("  2. O texto sera transmitido para a outra placa via LoRa.");
-  Serial.println("  3. Mensagens recebidas da outra placa serao exibidas aqui e no OLED.");
-  Serial.println("==================================================================");
-  Serial.println();
+  Serial.println("  - Digite na caixa de texto do Monitor Serial e aperte Enter.");
+  Serial.println("  - Ou aperte o botao PRG na placa para disparar um Ping de teste.");
+  Serial.println("==================================================================\n");
 }
 
 // ==============================================================================
 // LOOP PRINCIPAL
 // ==============================================================================
 void loop() {
-  // Processamento obrigatório das interrupções do chip LoRa (SX1276)
+  // Processamento contínuo das interrupções do chip LoRa (SX1276)
   Radio.IrqProcess();
 
-  // Botão PRG (GPIO 0) integrado para teste rápido sem precisar digitar
+  // Botão PRG (GPIO 0) para teste rápido de hardware
   static bool lastBtnState = HIGH;
   bool btnState = digitalRead(0);
   if (lastBtnState == HIGH && btnState == LOW) {
@@ -192,60 +233,72 @@ void loop() {
     if (digitalRead(0) == LOW) {
       if (lora_idle) {
         static int pingCount = 1;
-        enviarMensagem("Ping #" + String(pingCount++));
+        enviarMensagem("Ping de " + String(NOME_MEU) + " #" + String(pingCount++));
       }
     }
   }
   lastBtnState = btnState;
 
-  // Verifica se há dados digitados no Monitor Serial
+  // Leitura de texto digitado no Monitor Serial
   if (Serial.available() > 0) {
     String input = Serial.readStringUntil('\n');
-    input.trim(); // Remove '\r', espaços em branco extras
+    input.trim();
 
     if (input.length() > 0) {
       if (lora_idle) {
         enviarMensagem(input);
       } else {
-        Serial.println("[AVISO] O radio esta ocupado enviando outro pacote. Aguarde...");
+        Serial.println("[AVISO] O radio ainda esta transmitindo o pacote anterior. Aguarde...");
       }
     }
   }
 }
 
 // ==============================================================================
-// ENVIO DE MENSAGEM VIA LORA
+// ENVIO DE MENSAGEM VIA LORA (COM CABEÇALHO DE ENDEREÇAMENTO)
 // ==============================================================================
 void enviarMensagem(String msg) {
   lora_idle = false;
-  digitalWrite(LED, HIGH); // Acende o LED durante o envio
+  digitalWrite(LED, HIGH);
 
   lastTxMsg = msg;
 
-  // Copia mensagem para o buffer de transmissão
-  strncpy(txpacket, msg.c_str(), BUFFER_SIZE - 1);
-  txpacket[BUFFER_SIZE - 1] = '\0';
+  // Monta o cabeçalho de roteamento
+  LoRaHeader header;
+  header.netId = NETWORK_ID;
+  header.dest  = DEST_ID;
+  header.src   = MEU_ID;
+
+  uint16_t maxTextLen = BUFFER_SIZE - sizeof(LoRaHeader) - 1;
+  uint16_t msgLen = msg.length();
+  if (msgLen > maxTextLen) {
+    msgLen = maxTextLen;
+  }
+
+  // Empacotamento: [Cabeçalho (4 bytes)] + [Texto da mensagem]
+  memcpy(txpacket, &header, sizeof(LoRaHeader));
+  memcpy(txpacket + sizeof(LoRaHeader), msg.c_str(), msgLen);
+  uint16_t totalLen = sizeof(LoRaHeader) + msgLen;
+  txpacket[totalLen] = '\0';
 
   Serial.println();
-  Serial.print("[ENVIADO]: ");
-  Serial.println(msg);
+  Serial.printf("[ENVIADO de %s -> %s]: %s\n", NOME_MEU, NOME_DEST, msg.c_str());
 
   atualizarDisplay();
 
   // Envia os bytes pelo rádio LoRa
-  Radio.Send((uint8_t *)txpacket, strlen(txpacket));
+  Radio.Send((uint8_t *)txpacket, totalLen);
 }
 
 // ==============================================================================
-// CALLBACK: TRANSMISSÃO CONCLUÍDA COM SUCESSO
+// CALLBACK: TRANSMISSÃO CONCLUÍDA
 // ==============================================================================
 void OnTxDone(void) {
   digitalWrite(LED, LOW);
   Serial.println("  └─> Pacote transmitido com sucesso via LoRa!");
   
-  // Retorna imediatamente à escuta contínua de mensagens
   lora_idle = true;
-  Radio.Rx(0);
+  Radio.Rx(0); // Volta imediatamente à escuta contínua
 }
 
 // ==============================================================================
@@ -256,7 +309,6 @@ void OnTxTimeout(void) {
   Radio.Sleep();
   Serial.println("  └─> [ERRO]: Timeout durante transmissao!");
 
-  // Retorna à escuta
   lora_idle = true;
   Radio.Rx(0);
 }
@@ -269,36 +321,67 @@ void OnRxTimeout(void) {
 }
 
 // ==============================================================================
-// CALLBACK: ERRO DE RECEPÇÃO (CRC / PACOTE CORROMPIDO)
+// CALLBACK: ERRO DE CRC
 // ==============================================================================
 void OnRxError(void) {
   Serial.println("  └─> [AVISO]: Pacote recebido com erro de CRC!");
-  Serial.println("      (Dica: se as placas estiverem coladas na mesa, afaste-as em 1 a 2 metros)");
   Radio.Rx(0);
 }
 
 // ==============================================================================
-// CALLBACK: MENSAGEM RECEBIDA VIA LORA
+// CALLBACK: MENSAGEM RECEBIDA VIA LORA (COM FILTRAGEM DE DESTINO)
 // ==============================================================================
 void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr) {
   digitalWrite(LED, HIGH);
   Radio.Sleep();
 
-  // Converte o payload recebido em texto seguro com terminador nulo
-  uint16_t rxLen = (size < BUFFER_SIZE - 1) ? size : BUFFER_SIZE - 1;
-  memcpy(rxpacket, payload, rxLen);
-  rxpacket[rxLen] = '\0';
+  // 1. Validação de tamanho mínimo do cabeçalho
+  if (size < sizeof(LoRaHeader)) {
+    digitalWrite(LED, LOW);
+    lora_idle = true;
+    Radio.Rx(0);
+    return;
+  }
+
+  LoRaHeader header;
+  memcpy(&header, payload, sizeof(LoRaHeader));
+
+  // 2. Filtro de Rede Privada: descarta pacotes de vizinhos ou dispositivos desconhecidos
+  if (header.netId != NETWORK_ID) {
+    digitalWrite(LED, LOW);
+    lora_idle = true;
+    Radio.Rx(0);
+    return;
+  }
+
+  // 3. Filtro de Destinatário: descarta mensagens que não sejam para esta placa
+  if (header.dest != MEU_ID) {
+    digitalWrite(LED, LOW);
+    lora_idle = true;
+    Radio.Rx(0);
+    return;
+  }
+
+  // 4. Extração do conteúdo da mensagem
+  uint16_t textLen = size - sizeof(LoRaHeader);
+  if (textLen > BUFFER_SIZE - 1) {
+    textLen = BUFFER_SIZE - 1;
+  }
+
+  memcpy(rxpacket, payload + sizeof(LoRaHeader), textLen);
+  rxpacket[textLen] = '\0';
 
   lastRxMsg = String(rxpacket);
   lastRssi = rssi;
   lastSnr = snr;
 
+  const char* nomeRemetente = (header.src == 1) ? "Placa A" : "Placa B";
+
   // Feedback detalhado no Monitor Serial
   Serial.println();
   Serial.println("---------------- Nova Mensagem Recebida ----------------");
-  Serial.print("[RECEBIDO]: ");
-  Serial.println(lastRxMsg);
-  Serial.printf("Qualidade : RSSI = %d dBm | SNR = %d dB | Bytes = %d\n", rssi, snr, size);
+  Serial.printf("[RECEBIDO de %s]: %s\n", nomeRemetente, rxpacket);
+  Serial.printf("Qualidade : RSSI = %d dBm | SNR = %d dB | Total Bytes = %d\n", rssi, snr, size);
   Serial.println("---------------------------------------------------------");
 
   // Atualiza tela OLED
@@ -306,9 +389,8 @@ void OnRxDone(uint8_t *payload, uint16_t size, int16_t rssi, int8_t snr) {
 
   digitalWrite(LED, LOW);
 
-  // Retorna imediatamente ao modo de escuta de novos pacotes
   lora_idle = true;
-  Radio.Rx(0);
+  Radio.Rx(0); // Retorna ao modo de escuta
 }
 
 // ==============================================================================
@@ -319,8 +401,8 @@ void atualizarDisplay() {
   display.setTextAlignment(TEXT_ALIGN_LEFT);
   display.setFont(ArialMT_Plain_10);
 
-  // Cabeçalho estilizado com frequência
-  display.drawString(0, 0, "Heltec LoRa Chat (915)");
+  // Cabeçalho: Identidade da placa e para quem ela envia
+  display.drawString(0, 0, String(NOME_MEU) + " -> " + String(NOME_DEST));
   display.drawHorizontalLine(0, 13, 128);
 
   // Última mensagem enviada (TX)
@@ -344,7 +426,7 @@ void atualizarDisplay() {
   if (lastRssi != 0) {
     display.drawString(0, 49, "RSSI:" + String(lastRssi) + "dBm  SNR:" + String(lastSnr) + "dB");
   } else {
-    display.drawString(0, 49, "Aguardando sinal...");
+    display.drawString(0, 49, "Pronto | 916.5MHz");
   }
 
   display.display();
