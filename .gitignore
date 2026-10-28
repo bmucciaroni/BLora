@@ -1,0 +1,16 @@
+# Compilações e temporários do Arduino
+build/
+output/
+*.hex
+*.bin
+*.elf
+*.o
+*.d
+
+# Arquivos de IDE e editores
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
